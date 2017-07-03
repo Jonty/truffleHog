@@ -142,21 +142,26 @@ def find_strings(git_url):
 
                 lines = blob.diff.decode('utf-8', errors='replace').split('\n')
 
-                removed_strings = set()
-                added_strings = set()
+                removed_strings = []
+                added_strings = []
                 for line in lines:
                     # Skip submodules
                     if line.startswith('+Subproject commit'):
                         continue
 
                     if line.startswith('-'):
-                        removed_strings.update(find_suspicious_strings(line))
+                        removed_strings.extend(find_suspicious_strings(line))
 
                     if line.startswith('+'):
-                        added_strings.update(find_suspicious_strings(line))
+                        added_strings.extend(find_suspicious_strings(line))
 
-                stringsFound = list(added_strings - removed_strings)
-                if len(stringsFound) > 0:
+                # This isn't done with sets as we care about duplicates of
+                # "bad" strings being added to files
+                for string in removed_strings:
+                    if string in added_strings:
+                        del added_strings[added_strings.index(string)]
+
+                if len(added_strings) > 0:
                     commit_time = datetime.datetime.fromtimestamp(commit.committed_date).strftime('%Y-%m-%d %H:%M:%S')
                     
                     output['entropicDiffs'].append({
@@ -166,7 +171,7 @@ def find_strings(git_url):
                         'commit_sha': commit.hexsha,
                         'diff': blob.diff.decode('utf-8', errors='replace'),
                         'path': blob.a_path or blob.b_path,
-                        'stringsFound': stringsFound,
+                        'stringsFound': added_strings,
                     })
 
 
