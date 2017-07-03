@@ -10,7 +10,8 @@ setup(
     license='GNU',
     packages =['truffleHog'],
     install_requires=[
-        'GitPython == 2.1.1'
+        'GitPython == 2.1.1',
+        'backports.tempfile == 1.0rc1'
     ],
     entry_points = {
       'console_scripts': ['trufflehog = truffleHog.truffleHog:main'],

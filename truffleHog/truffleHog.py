@@ -1,47 +1,50 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
-import shutil
 import math
-import datetime
 import argparse
-import tempfile
-import os
 import json
-import stat
-from git import Repo
+import git
+
+# Because the TemporaryDirectory context manager was added in 3.2
+from backports import tempfile
 
 def main():
     parser = argparse.ArgumentParser(description='Find secrets hidden in the depths of git.')
     parser.add_argument('--json', dest="output_json", action="store_true", help="Output in JSON")
     parser.add_argument('git_url', type=str, help='URL for secret searching')
     args = parser.parse_args()
-    output = find_strings(args.git_url)
-    project_path = output["project_path"]
-    shutil.rmtree(project_path, onerror=del_rw)
+    suspicious_commits = find_strings(args.git_url)
 
-    for diff in output["entropicDiffs"]:
+    for commit in suspicious_commits:
         if args.output_json:
-            print(json.dumps(output, sort_keys=True, indent=4))
+            print(json.dumps(commit, sort_keys=True, indent=4))
         else:
-            print(bcolors.OKGREEN + "Date: " + diff['date'] + bcolors.ENDC)
-            print(bcolors.OKGREEN + "Branch: " + diff['branch'] + bcolors.ENDC)
-            print(bcolors.OKGREEN + ("Path: %s" % diff['path']) + bcolors.ENDC)
-            print(bcolors.OKGREEN + "Commit: " + diff['commit_sha'] + bcolors.ENDC)
-            print(bcolors.OKGREEN + "Message: " + diff['commit'] + bcolors.ENDC)
+            def cprint(string, col):
+                print(col + string + colour.ENDC)
+
+            cprint('commit %s' % commit['commit_sha'], colour.YELLOW)
+            print('Author: %s' % commit['author'])
+            print('Date:   %s' % commit['date'].strftime('%Y-%m-%d %H:%M:%S') + ' (%s)' % (commit['author_tz_offset']/60/60))
+            print
+            print('    %s' % commit['short_message'])
+            print
             
-            highlightedDiff = diff['diff']
-            for string in diff['stringsFound']:
-                highlightedDiff = highlightedDiff.replace(string, bcolors.WARNING + string + bcolors.ENDC)
-            print(highlightedDiff)
+            for blob in commit['suspicious_blobs']:
+                cprint('index %s' % blob['hexes'], colour.YELLOW)
+                cprint('--- a/%s' % blob['path'], colour.BOLD)
+                cprint('+++ b/%s' % blob['path'], colour.BOLD)
+                highlighted_diff = blob['diff']
+                for string in blob['suspicious_strings']:
+                    highlighted_diff = highlighted_diff.replace(string, colour.BOLD + colour.RED + string + colour.ENDC)
+                
+                first_line = blob['diff'].splitlines()[0]
+                highlighted_diff = highlighted_diff.replace(first_line, colour.CYAN + first_line + colour.ENDC)
+                print(highlighted_diff)
 
 
 BASE64_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/="
 HEX_CHARS = "1234567890abcdefABCDEF"
-
-def del_rw(action, name, exc):
-    os.chmod(name, stat.S_IWRITE)
-    os.remove(name)
 
 def shannon_entropy(data, iterator):
     """
@@ -91,92 +94,97 @@ def find_suspicious_strings(line):
     return stringsFound
 
 
-class bcolors:
+class colour:
     HEADER = '\033[95m'
     OKBLUE = '\033[94m'
     OKGREEN = '\033[92m'
     WARNING = '\033[93m'
-    FAIL = '\033[91m'
+    YELLOW = '\033[33m'
+    FAIL = '\033[31m'
+    RED = '\033[41m'
     ENDC = '\033[0m'
     BOLD = '\033[1m'
     UNDERLINE = '\033[4m'
+    CYAN = '\033[36m'
 
 
 def find_strings(git_url):
-    project_path = tempfile.mkdtemp()
-    Repo.clone_from(git_url, project_path)
-    output = {
-        'entropicDiffs': []
-    }
-    repo = Repo(project_path)
+    with tempfile.TemporaryDirectory() as checkout_path:
+        repo = git.Repo.clone_from(git_url, checkout_path)
 
-    seen_commits = set()
+        suspicious_commits = []
+        seen_commits = set()
+        for remote_branch in repo.remotes.origin.fetch():
+            branch_name = str(remote_branch).split('/')[1]
+            try:
+                repo.git.checkout(remote_branch, b=branch_name)
+            except:
+                pass
 
-    for remote_branch in repo.remotes.origin.fetch():
-        branch_name = str(remote_branch).split('/')[1]
-        try:
-            repo.git.checkout(remote_branch, b=branch_name)
-        except:
-            pass
-
-        for commit in repo.iter_commits():
-            # Skip this for the root commit
-            if not commit.parents:
-                continue
-
-            # Skip commits we've already seen on other branches
-            if commit.hexsha in seen_commits:
-                continue
-            seen_commits.add(commit.hexsha)
-
-            # Skip merge commits
-            if len(commit.parents) > 1:
-                continue
-
-            parent = commit.parents[0]
-            diff = commit.diff(parent, create_patch=True)
-            for blob in diff:
-                printableDiff = blob.diff.decode('utf-8', errors='replace')
-                if printableDiff.startswith('Binary files'):
+            for commit in repo.iter_commits():
+                # Skip this for the root commit
+                if not commit.parents:
                     continue
 
-                lines = blob.diff.decode('utf-8', errors='replace').split('\n')
+                # Skip commits we've already seen on other branches
+                if commit.hexsha in seen_commits:
+                    continue
+                seen_commits.add(commit.hexsha)
 
-                removed_strings = []
-                added_strings = []
-                for line in lines:
-                    # Skip submodules
-                    if line.startswith('+Subproject commit'):
+                # Skip merge commits
+                if len(commit.parents) > 1:
+                    continue
+
+                parent = commit.parents[0]
+                diff = parent.diff(commit, create_patch=True)
+
+                suspicious_blobs = []
+                for blob in diff:
+                    printableDiff = blob.diff.decode('utf-8', errors='replace')
+                    if printableDiff.startswith('Binary files'):
                         continue
 
-                    if line.startswith('-'):
-                        removed_strings.extend(find_suspicious_strings(line))
+                    lines = blob.diff.decode('utf-8', errors='replace').split('\n')
 
-                    if line.startswith('+'):
-                        added_strings.extend(find_suspicious_strings(line))
+                    removed_strings = []
+                    added_strings = []
+                    for line in lines:
+                        # Skip submodules
+                        if line.startswith('+Subproject commit'):
+                            continue
 
-                # This isn't done with sets as we care about duplicates of
-                # "bad" strings being added to files
-                for string in removed_strings:
-                    if string in added_strings:
-                        del added_strings[added_strings.index(string)]
+                        if line.startswith('-'):
+                            removed_strings.extend(find_suspicious_strings(line[1:]))
 
-                if len(added_strings) > 0:
-                    commit_time = datetime.datetime.fromtimestamp(commit.committed_date).strftime('%Y-%m-%d %H:%M:%S')
-                    
-                    output['entropicDiffs'].append({
-                        'date':  commit_time,
+                        if line.startswith('+'):
+                            added_strings.extend(find_suspicious_strings(line[1:]))
+
+                    # This isn't done with sets as we care about duplicates of
+                    # "bad" strings being added to files
+                    for string in removed_strings:
+                        if string in added_strings:
+                            del added_strings[added_strings.index(string)]
+
+                    if len(added_strings) > 0:
+                        suspicious_blobs.append({
+                            'diff': blob.diff.decode('utf-8', errors='replace'),
+                            'path': blob.a_path or blob.b_path,
+                            'suspicious_strings': added_strings,
+                            'hexes': blob.a_blob or blob.b_blob,
+                        })
+
+                if suspicious_blobs:
+                    suspicious_commits.append({
+                        'date':  commit.authored_datetime,
+                        'author_tz_offset': commit.author_tz_offset,
+                        'author': '%s <%s>' % (commit.author.name, commit.author.email),
                         'branch': branch_name,
-                        'commit': commit.message,
+                        'short_message': commit.summary,
                         'commit_sha': commit.hexsha,
-                        'diff': blob.diff.decode('utf-8', errors='replace'),
-                        'path': blob.a_path or blob.b_path,
-                        'stringsFound': added_strings,
+                        'suspicious_blobs': suspicious_blobs,
                     })
 
-
-    output['project_path'] = project_path
-    return output
+        return suspicious_commits
 
 
 if __name__ == '__main__':
