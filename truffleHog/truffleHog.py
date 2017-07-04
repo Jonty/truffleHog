@@ -99,6 +99,14 @@ def find_suspicious_strings(line):
     return found
 
 
+filters = ["node_modules"]
+def is_filtered_path(path):
+    for string in filters:
+        if string in path:
+            return True
+    return False
+
+
 class colour:
     HEADER = '\033[95m'
     OKBLUE = '\033[94m'
@@ -145,6 +153,9 @@ def find_strings(git_url):
 
                 suspicious_blobs = []
                 for blob in diff:
+                    if is_filtered_path(blob.a_path or blob.b_path):
+                        continue
+
                     printableDiff = blob.diff.decode('utf-8', errors='replace')
                     if printableDiff.startswith('Binary files'):
                         continue
