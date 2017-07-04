@@ -4,7 +4,12 @@
 import math
 import argparse
 import json
+import re
+from collections import defaultdict
+
 import git
+
+import enchant
 
 # Because the TemporaryDirectory context manager was added in 3.2
 from backports import tempfile
@@ -15,7 +20,6 @@ def main():
     parser.add_argument('git_url', type=str, help='URL for secret searching')
     args = parser.parse_args()
     suspicious_commits = find_strings(args.git_url)
-
     for commit in suspicious_commits:
         if args.output_json:
             print(json.dumps(commit, sort_keys=True, indent=4))
@@ -45,53 +49,54 @@ def main():
 
 BASE64_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/="
 HEX_CHARS = "1234567890abcdefABCDEF"
+d = enchant.Dict("en_US")
 
-def shannon_entropy(data, iterator):
-    """
-    Borrowed from http://blog.dkbza.org/2007/05/scanning-data-for-entropy-anomalies.html
-    """
-    if not data:
-        return 0
+def shannon_entropy(data):
+    bit = 1.0 / len(data)
+    counts = defaultdict(lambda: 0)
+    for char in data:
+        counts[char] += bit
+
     entropy = 0
-    for x in iterator:
-        p_x = float(data.count(x))/len(data)
-        if p_x > 0:
-            entropy += - p_x*math.log(p_x, 2)
+    for _, frequency in counts.items():
+        entropy += - frequency * math.log(frequency, 2)
+
     return entropy
 
 
-def get_strings_of_set(word, char_set, threshold=20):
-    count = 0
-    letters = ""
-    strings = []
-    for char in word:
-        if char in char_set:
-            letters += char
-            count += 1
-        else:
-            if count > threshold:
-                strings.append(letters)
-            letters = ""
-            count = 0
-    if count > threshold:
-        strings.append(letters)
-    return strings
+def strings_matching(line, char_set, threshold=15):
+    return re.findall('[%s]{%d,}' % (char_set, threshold), line)
 
+
+def is_probably_language(string, language='en'):
+    string = string.replace('/', ' ')
+
+    upper_sentence = re.findall('[A-Z][^A-Z]+', string)
+    count = 0
+    for word in upper_sentence:
+        if d.check(word.strip()):
+            count += 1
+
+    if count > len(upper_sentence) / 2:
+        return True
+    else:
+        return False
 
 def find_suspicious_strings(line):
-    stringsFound = []
-    for word in line.split():
-        base64_strings = get_strings_of_set(word, BASE64_CHARS)
-        hex_strings = get_strings_of_set(word, HEX_CHARS)
-        for string in base64_strings:
-            b64Entropy = shannon_entropy(string, BASE64_CHARS)
-            if b64Entropy > 4.5:
-                stringsFound.append(string)
-        for string in hex_strings:
-            hexEntropy = shannon_entropy(string, HEX_CHARS)
-            if hexEntropy > 3:
-                stringsFound.append(string)
-    return stringsFound
+    found = []
+
+    base64_strings = strings_matching(line, BASE64_CHARS)
+    for string in base64_strings:
+        #print(string, shannon_entropy(string))
+        if shannon_entropy(string) > 4.0 and not is_probably_language(string):
+            found.append(string)
+
+    hex_strings = strings_matching(line, HEX_CHARS)
+    for string in hex_strings:
+        if shannon_entropy(string) > 3 and not is_probably_language(string):
+            found.append(string)
+
+    return found
 
 
 class colour:
@@ -122,10 +127,6 @@ def find_strings(git_url):
                 pass
 
             for commit in repo.iter_commits():
-                # Skip this for the root commit
-                if not commit.parents:
-                    continue
-
                 # Skip commits we've already seen on other branches
                 if commit.hexsha in seen_commits:
                     continue
@@ -135,8 +136,12 @@ def find_strings(git_url):
                 if len(commit.parents) > 1:
                     continue
 
-                parent = commit.parents[0]
-                diff = parent.diff(commit, create_patch=True)
+                if not commit.parents:
+                    # For root commits we diff against the empty tree
+                    diff = commit.diff(git.NULL_TREE, create_patch=True)
+                else:
+                    parent = commit.parents[0]
+                    diff = parent.diff(commit, create_patch=True)
 
                 suspicious_blobs = []
                 for blob in diff:
