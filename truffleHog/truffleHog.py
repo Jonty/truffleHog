@@ -16,6 +16,10 @@ from backports import tempfile
 RE_HUNK_HEADER = re.compile(
     r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))?\ @@[ ]?(.*)")
 
+BASE64_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/="
+HEX_CHARS = "1234567890abcdefABCDEF"
+
+d = enchant.Dict("en_US")
 context = 3
 
 def main():
@@ -23,7 +27,11 @@ def main():
     parser.add_argument('git_url', type=str, help='URL for secret searching')
     args = parser.parse_args()
     suspicious_commits = find_strings(args.git_url)
-    for commit in suspicious_commits:
+    print_commits(suspicious_commits)
+
+
+def print_commits(commits):
+    for commit in commits:
         def cprint(string, col):
             print(col + string + colour.ENDC)
 
@@ -115,10 +123,6 @@ def main():
 
             print_hunk(hunk)
 
-
-BASE64_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/="
-HEX_CHARS = "1234567890abcdefABCDEF"
-d = enchant.Dict("en_US")
 
 def shannon_entropy(data):
     bit = 1.0 / len(data)
